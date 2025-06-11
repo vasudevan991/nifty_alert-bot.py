@@ -1,15 +1,48 @@
 import yfinance as yf
 import pandas as pd
 import requests
+import time
 
 # ============ TELEGRAM SETTINGS ============
-TELEGRAM_TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your bot token
-CHAT_ID = 'YOUR_CHAT_ID'           # Replace with your chat ID
+TELEGRAM_TOKEN = '7511613332:AAGxdNIUsUFZL5JY5gAfL0aKeqqqD2Km8pY'
+CHAT_ID = '383202961'
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message}
-    requests.post(url, data=data)
+
+    try:
+        response = requests.post(url, data=data)
+        response.raise_for_status()
+        print(f"✅ Message sent to Telegram: {message[:50]}...")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Failed to send Telegram message: {e}")
+
+# ============ LOAD INDEX STOCKS FROM CSV ============
+def get_index_stocks():
+    files = ['nifty50.csv', 'niftynext50.csv', 'midcap100.csv']
+    all_stocks = []
+
+    for file in files:
+        try:
+            df = pd.read_csv(file)
+            if 'Symbol' in df.columns:
+                symbols = df['Symbol'].dropna().astype(str)
+                symbols = symbols[symbols.str.isalpha()]
+                all_stocks.extend(symbols.tolist())
+            else:
+                print(f"⚠️ Column 'Symbol' not found in {file}")
+        except Exception as e:
+            print(f"⚠️ Error loading {file}: {e}")
+    return list(set(all_stocks))
+
+# ============ CHECK IF STOCK IS VALID ============
+def is_valid_stock(stock):
+    try:
+        df = yf.download(stock + ".NS", period="5d", interval="1d", progress=False)
+        return not df.empty
+    except:
+        return False
 
 # ============ SUPPORT & RESISTANCE ============
 def detect_support_resistance(df, window=10):
@@ -26,16 +59,19 @@ def detect_support_resistance(df, window=10):
 
 # ============ MAIN SIGNAL FUNCTION ============
 def get_signals(stock):
-    df = yf.download(stock + ".NS", period='120d', interval='1d', auto_adjust=True)
+    try:
+        df = yf.download(stock + ".NS", period='120d', interval='1d', progress=False)
+    except Exception as e:
+        print(f"⚠️ Failed to download data for {stock}: {e}")
+        return None
+
     if df.empty or len(df) < 100:
         return None
 
-    # Technical Indicators
     df['SMA50'] = df['Close'].rolling(50).mean()
     df['SMA100'] = df['Close'].rolling(100).mean()
     df['SMA200'] = df['Close'].rolling(200).mean()
 
-    # RSI
     delta = df['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -44,14 +80,10 @@ def get_signals(stock):
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # MACD
     df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
     df['Signal'] = df['MACD'].ewm(span=9).mean()
-
-    # Volume filter
     df['AvgVol20'] = df['Volume'].rolling(20).mean()
 
-    # ATR
     df['H-L'] = df['High'] - df['Low']
     df['H-PC'] = abs(df['High'] - df['Close'].shift(1))
     df['L-PC'] = abs(df['Low'] - df['Close'].shift(1))
@@ -66,7 +98,8 @@ def get_signals(stock):
     prev = df.iloc[-2]
     alerts = []
 
-    # === Trading Signals ===
+    print(f"🔎 {stock} | Close: {latest['Close']:.2f}, RSI: {latest['RSI']:.2f}, MACD: {latest['MACD']:.2f}, Signal: {latest['Signal']:.2f}, Vol: {latest['Volume']}")
+
     if latest['MACD'] > latest['Signal'] and prev['MACD'] < prev['Signal']:
         alerts.append("📊 MACD Bullish Crossover")
 
@@ -84,14 +117,12 @@ def get_signals(stock):
     if latest['Volume'] > 1.5 * latest['AvgVol20']:
         alerts.append(f"🔊 Volume Surge ({int(latest['Volume'])} > 1.5× avg)")
 
-    # === Support / Resistance ===
     support, resistance = detect_support_resistance(df)
     if support is not None and latest['Close'] <= support * 1.03:
         alerts.append(f"🛡️ Near Support ₹{support:.2f}")
     if resistance is not None and latest['Close'] > resistance:
         alerts.append(f"🚀 Resistance Breakout ₹{resistance:.2f}")
 
-    # === ATR-Based Target & Stop Loss ===
     atr = latest['ATR']
     close = latest['Close']
     if pd.notnull(atr):
@@ -103,20 +134,32 @@ def get_signals(stock):
         return f"📈 {stock} Alert:\n" + "\n".join(alerts)
     return None
 
-# ============ STOCK LIST ============
-stocks = ['TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'RELIANCE', 'AXISBANK', 'SBIN', 'LT', 'ITC']
+# ============ MAIN EXECUTION ============
+if __name__ == "__main__":
+    all_stocks = get_index_stocks()
 
-any_signal = False
+    print(f"\n🔍 Validating {len(all_stocks)} stock symbols...\n")
+    valid_stocks = []
 
-for stock in stocks:
-    signal = get_signals(stock)
-    if signal:
-        print(signal)
-        send_telegram(signal)
-        any_signal = True
+    for stock in all_stocks:
+        if is_valid_stock(stock):
+            valid_stocks.append(stock)
+        else:
+            print(f"❌ Skipping invalid/delisted symbol: {stock}")
+        time.sleep(0.5)
 
-# ✅ Final message to confirm script worked
-if any_signal:
-    send_telegram("✅ Stock scan complete. Alerts sent.")
-else:
-    send_telegram("ℹ️ Stock scan complete. No signals found today.")
+    print(f"\n✅ {len(valid_stocks)} valid stocks found. Running alerts...\n")
+
+    for stock in valid_stocks:
+        try:
+            signal = get_signals(stock)
+            if signal:
+                print(signal)
+                try:
+                    send_telegram(signal)
+                    print(f"📤 Alert sent to Telegram for {stock}")
+                except Exception as e:
+                    print(f"❌ Telegram error for {stock}: {e}")
+            time.sleep(1.5)
+        except Exception as e:
+            print(f"⚠️ Error processing {stock}: {e}")

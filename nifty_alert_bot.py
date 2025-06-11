@@ -135,7 +135,7 @@ def get_signals(stock):
 
 # ============ MAIN EXECUTION ============
 if __name__ == "__main__":
-    all_stocks = get_index_stocks()
+    all_stocks = ['TCS']
 
     print(f"\n🔍 Validating {len(all_stocks)} stock symbols...\n")
     valid_stocks = []

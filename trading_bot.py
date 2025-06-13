@@ -19,7 +19,7 @@ def send_telegram(message):
         print("[ERROR] TELEGRAM_TOKEN or CHAT_ID not set in environment variables.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message}
+    data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         response = requests.post(url, data=data)
         response.raise_for_status()
@@ -109,7 +109,6 @@ def is_evening_star(df):
 
 def detect_failed_flag(df, lookback=20):
     closes = df['Close'][-lookback:]
-    highs = df['High'][-lookback:]
     resistance = closes.max()
     breakout_idx = None
     for i in range(1, len(closes)):
@@ -155,11 +154,9 @@ def detect_double_bottom(df, lookback=40, tolerance=0.005):
 def detect_chart_patterns(df):
     patterns = []
     recent = df[-40:]
-
     closes = pd.to_numeric(recent['Close'], errors='coerce')
     highs = pd.to_numeric(recent['High'], errors='coerce')
     lows = pd.to_numeric(recent['Low'], errors='coerce')
-
     resistance = closes.max()
     support = closes.min()
 
@@ -310,19 +307,31 @@ def get_signals(stock):
     if not should_trigger:
         return None
 
-    msg = f"[ALERT] {stock} Signal:\n"
+    msg = f"[ALERT] {stock} Signal\n"
     if indicators:
-        msg += "\n" + "\n".join(["[BULL] " + x for x in indicators]) + "\n"
+        msg += "\n" + "\n".join([f"🟢 [BULL] {x}" for x in indicators]) + "\n"
     if bearish_patterns:
-        msg += "\n" + "\n".join(["[BEAR] " + x for x in bearish_patterns]) + "\n"
+        msg += "\n" + "\n".join([f"🔴 [BEAR] {x}" for x in bearish_patterns]) + "\n"
     if chart_patterns:
-        msg += "\n" + "\n".join(["[CHART] " + x for x in chart_patterns]) + "\n"
+        for pattern in chart_patterns:
+            if "Double Top" in pattern:
+                msg += f"\n⛰️⛰️ [CHART] {pattern}"
+            elif "Double Bottom" in pattern:
+                msg += f"\n🏔️🏔️ [CHART] {pattern}"
+            elif "Failed Flag" in pattern:
+                msg += f"\n🚩❌ [CHART] {pattern}"
+            else:
+                msg += f"\n📊 [CHART] {pattern}"
+        msg += "\n"
     if support_resist:
         msg += "\n" + "\n".join(support_resist) + "\n"
 
     msg += (
-        f"\nClose: ₹{close:.2f} | RSI: {rsi:.1f}\n"
-        f"Pivot: ₹{pivot:.2f} | S1: ₹{s1:.2f} | S2: ₹{s2:.2f} | R1: ₹{r1:.2f} | R2: ₹{r2:.2f}"
+        f"\n*Current Levels:*\n"
+        f"Close: `{close:.2f}` | RSI: `{rsi:.1f}`\n"
+        f"Pivot: `{pivot:.2f}`\n"
+        f"S1: `{s1:.2f}` | S2: `{s2:.2f}`\n"
+        f"R1: `{r1:.2f}` | R2: `{r2:.2f}`\n"
     )
 
     # Advanced target/stoploss logic for both bullish and bearish signals
@@ -331,7 +340,7 @@ def get_signals(stock):
     elif len(bearish_patterns) > 0 and not indicators:
         direction = 'bearish'
     else:
-        direction = 'bullish'  # or skip target/stoploss entirely if you prefer
+        direction = 'bullish'
 
     entry = close
     risk_percent = RISK_PERCENT
@@ -341,16 +350,20 @@ def get_signals(stock):
         risk_amt = entry - stop
         target = entry + 3 * risk_amt
         msg += (
-            f"\n[ALERT] 1:3 Risk:Reward (Bullish)\n"
-            f"Entry: ₹{entry:.2f} | Target: ₹{target:.2f} | Stop Loss: ₹{stop:.2f}"
+            f"\n🟢 *1:3 Risk:Reward (Bullish)*\n"
+            f"🚀 *Entry:* `{entry:.2f}`\n"
+            f"🎯 *Target:* `{target:.2f}`\n"
+            f"🛑 *Stop Loss:* `{stop:.2f}`\n"
         )
     elif direction == 'bearish':
         stop = entry * (1 + risk_percent / 100)
         risk_amt = stop - entry
         target = entry - 3 * risk_amt
         msg += (
-            f"\n[ALERT] 1:3 Risk:Reward (Bearish)\n"
-            f"Entry: ₹{entry:.2f} | Target: ₹{target:.2f} | Stop Loss: ₹{stop:.2f}"
+            f"\n🔴 *1:3 Risk:Reward (Bearish)*\n"
+            f"🔻 *Entry:* `{entry:.2f}`\n"
+            f"🎯 *Target:* `{target:.2f}`\n"
+            f"🛑 *Stop Loss:* `{stop:.2f}`\n"
         )
 
     return msg, df

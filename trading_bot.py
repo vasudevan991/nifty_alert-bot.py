@@ -12,8 +12,7 @@ sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
 # === SETTINGS ===
 TELEGRAM_TOKEN = '7511613332:AAGxdNIUsUFZL5JY5gAfL0aKeqqqD2Km8pY'
 CHAT_ID = '383202961'
-STOP_LOSS_PERCENT = 3
-TARGET_PERCENT = 5
+RISK_PERCENT = 1  # Risk % per trade for 1:3 risk:reward
 
 def send_telegram(message):
     if TELEGRAM_TOKEN is None or CHAT_ID is None:
@@ -108,9 +107,54 @@ def is_evening_star(df):
         c3_close < ((c1_open + c1_close) / 2)
     )
 
+def detect_failed_flag(df, lookback=20):
+    closes = df['Close'][-lookback:]
+    highs = df['High'][-lookback:]
+    resistance = closes.max()
+    breakout_idx = None
+    for i in range(1, len(closes)):
+        if closes.iloc[i-1] <= resistance and closes.iloc[i] > resistance * 1.01:
+            breakout_idx = i
+            break
+    if breakout_idx and breakout_idx + 2 < len(closes):
+        for j in range(breakout_idx+1, len(closes)):
+            if closes.iloc[j] < resistance:
+                return True
+    return False
+
+def detect_double_top(df, lookback=40, tolerance=0.005):
+    closes = df['Close'][-lookback:]
+    highs = df['High'][-lookback:]
+    peaks = []
+    for i in range(1, len(highs)-1):
+        if highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]:
+            peaks.append((i, highs.iloc[i]))
+    if len(peaks) >= 2:
+        sorted_peaks = sorted(peaks, key=lambda x: x[1], reverse=True)
+        p1, p2 = sorted_peaks[0], sorted_peaks[1]
+        if abs(p1[1] - p2[1]) / max(p1[1], p2[1]) < tolerance and abs(p1[0] - p2[0]) > 3:
+            if closes.iloc[max(p1[0], p2[0]):].min() < min(p1[1], p2[1]) * (1 - 2*tolerance):
+                return True
+    return False
+
+def detect_double_bottom(df, lookback=40, tolerance=0.005):
+    closes = df['Close'][-lookback:]
+    lows = df['Low'][-lookback:]
+    troughs = []
+    for i in range(1, len(lows)-1):
+        if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]:
+            troughs.append((i, lows.iloc[i]))
+    if len(troughs) >= 2:
+        sorted_troughs = sorted(troughs, key=lambda x: x[1])
+        t1, t2 = sorted_troughs[0], sorted_troughs[1]
+        if abs(t1[1] - t2[1]) / max(t1[1], t2[1]) < tolerance and abs(t1[0] - t2[0]) > 3:
+            if closes.iloc[max(t1[0], t2[0]):].max() > max(t1[1], t2[1]) * (1 + 2*tolerance):
+                return True
+    return False
+
 def detect_chart_patterns(df):
     patterns = []
-    recent = df[-20:]
+    recent = df[-40:]
 
     closes = pd.to_numeric(recent['Close'], errors='coerce')
     highs = pd.to_numeric(recent['High'], errors='coerce')
@@ -139,6 +183,13 @@ def detect_chart_patterns(df):
         last_low = float(lows.iloc[-1])
         if last_high < max_high * 0.98 and abs(float(lows.min()) - last_low) < 0.5:
             patterns.append("Descending Triangle (Possible Breakdown)")
+
+    if detect_failed_flag(recent):
+        patterns.append("Failed Flag Pattern")
+    if detect_double_top(recent):
+        patterns.append("Double Top Pattern")
+    if detect_double_bottom(recent):
+        patterns.append("Double Bottom Pattern")
 
     return patterns
 
@@ -185,13 +236,11 @@ def get_signals(stock):
     if df.empty or len(df) < 100:
         return None
 
-    # --- Robust column handling ---
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ['_'.join(map(str, filter(None, col))).strip('_') for col in df.columns.values]
     else:
         df.columns = [str(col) for col in df.columns]
 
-    # Map columns like 'Open_INFY.NS' to 'Open', etc.
     base_names = ['Open', 'High', 'Low', 'Close']
     mapped_cols = {}
     for base in base_names:
@@ -276,16 +325,37 @@ def get_signals(stock):
         f"Pivot: ₹{pivot:.2f} | S1: ₹{s1:.2f} | S2: ₹{s2:.2f} | R1: ₹{r1:.2f} | R2: ₹{r2:.2f}"
     )
 
-    if len(indicators) >= 2:
-        entry = close
-        stop = entry * (1 - STOP_LOSS_PERCENT / 100)
-        target = entry * (1 + TARGET_PERCENT / 100)
-        msg += f"\nTarget: ₹{target:.2f} | Stop Loss: ₹{stop:.2f}"
+    # Advanced target/stoploss logic for both bullish and bearish signals
+    if len(indicators) >= 2 and not bearish_patterns:
+        direction = 'bullish'
+    elif len(bearish_patterns) > 0 and not indicators:
+        direction = 'bearish'
+    else:
+        direction = 'bullish'  # or skip target/stoploss entirely if you prefer
+
+    entry = close
+    risk_percent = RISK_PERCENT
+
+    if direction == 'bullish':
+        stop = entry * (1 - risk_percent / 100)
+        risk_amt = entry - stop
+        target = entry + 3 * risk_amt
+        msg += (
+            f"\n[ALERT] 1:3 Risk:Reward (Bullish)\n"
+            f"Entry: ₹{entry:.2f} | Target: ₹{target:.2f} | Stop Loss: ₹{stop:.2f}"
+        )
+    elif direction == 'bearish':
+        stop = entry * (1 + risk_percent / 100)
+        risk_amt = stop - entry
+        target = entry - 3 * risk_amt
+        msg += (
+            f"\n[ALERT] 1:3 Risk:Reward (Bearish)\n"
+            f"Entry: ₹{entry:.2f} | Target: ₹{target:.2f} | Stop Loss: ₹{stop:.2f}"
+        )
 
     return msg, df
 
 if __name__ == "__main__":
-    # Update: Process all stocks from the CSV files
     ticker_files = ["nifty50.csv", "nifty_next_50.csv", "midcap.csv"]
     tickers = read_tickers_from_csv(ticker_files)
     print(f"[INFO] Total tickers loaded: {len(tickers)}")
